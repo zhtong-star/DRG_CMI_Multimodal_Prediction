@@ -1,0 +1,11 @@
+# Install the appropriate PyTorch CPU/CUDA build for your machine first.
+# Versions below are the environment used for the CPU validation, not historical training claims.
+torch==2.9.0
+transformers==4.57.6
+tokenizers>=0.22.0,<0.24
+numpy>=1.26,<3
+pandas==2.3.3
+scikit-learn==1.7.2
+scipy>=1.11,<2
+# Optional: CAML binary word2vec loading (install separately): gensim>=4.4,<5
+# Optional: attention plotting (install separately): matplotlib>=3.8,<4

@@ -1,0 +1,64 @@
+# Manuscript and Figure 1 Alignment Audit
+
+Audit date: November 27, 2026. The target code and public documentation were compared with the latest supplied manuscript and Figure 1. This is an implementation audit; it does not establish that historical runs used the corrected code.
+
+## Reference Materials
+
+- Manuscript: `jmir-11-27.docx`, SHA-256 `e32b6ea68cab0987829f5b156273aa9dc140e061e54e8cf2398844a7498b2281`.
+- Figure: `figure1.pptx`, SHA-256 `315fc91a7bcc5930c7c492e2bf73a47f6daac36cf2a5c3a43fbafab466f6e09b`.
+- The manuscript was extracted with paragraph, table, and equation anchors and rendered read-only for visual review. Figure 1 was rendered and its labels, shapes, equations, and connections were visually checked. The source files and original source-code directory were not modified or added to the repository.
+- Paragraph references below use the extracted manuscript sequence (`P031`, etc.); table references use their extracted table number. `.qa/revision_20261127/` contains ignored working copies and review artifacts, not release files.
+
+## End-to-End Correspondence
+
+| Manuscript / Figure 1 description | Current implementation | Audit result |
+| --- | --- | --- |
+| Early prediction of one DRG class per hospital admission; separate MS-DRG and APR-DRG tasks (title, P031–032) | `create_cohorts.py`, `data_utils_multimodal.py`; one categorical target per admission | Aligned. DRG labels and relative weights are not model features. |
+| MIMIC-III v1.4, BIDMC, 2001–2012; age ≥18; one ICU stay; ICU LOS ≥24h; eligible note and complete label/weight/multimodal data (P031–032) | `create_cohorts.filter_cohort`, `collect_notes`, `finalize_cohorts.finalize` | The code applies age, single ICU, ≥24h LOS, note and label/weight checks, and excludes admissions without any structured measurement. The no-transfer screen is retained from the old code because the paper is silent about transfer status. Actual counts are not hard-coded. See the cohort contradiction below. |
+| Reported final cohort sizes 19,789 MS / 27,394 APR; 611 / 908 classes; missing-structured exclusions 3 / 20 (P031–032 and Table 1) | `cohort_audit.json`, `extraction_audit.json`, `finalization_audit.json` record computed counts | Not reproduced. Previously recorded complete screening of local metadata gives 18,144 MS / 24,673 APR after the explicit LOS filter and before note/structured screening. Those counts are already below the reported final totals. The code follows the explicit method and does not fabricate the paper's counts. |
+| Notes from hospital admission through ICU +24/48h; negative ICU-relative times may occur; discharge summaries excluded (P037–038) | `create_cohorts.collect_notes`, `clinical_text.select_notes`, `MultimodalDrgDataset.read_text` | Aligned in time origin and exclusion. The exact prediction horizon is applied to original chart time relative to ICU admission; the hospital-admission lower bound is independently enforced. |
+| Adjacent-paragraph cosine and Levenshtein cleaning before tokenization; remove deidentification placeholders (P037–038) | `clinical_text.clean_note_paragraphs`, `deduplicate_adjacent_paragraphs`, `levenshtein_similarity` | Paragraph boundaries are preserved until cleaning; no 512-token prefix cap remains. A paragraph is removed only when both similarities are strictly greater than τ. The paper does not give a numeric τ; `0.95` remains an explicit code default recorded in provenance. This exact similarity-token definition is an implementation choice. |
+| Clinical-Longformer with up to 4,096 tokens; padding masked (P018, P037–038; Figure 1) | `models_multimodal.DRGModel`, `data_utils_multimodal.MultimodalDrgDataset` | Aligned. Token mask is applied in the encoder and label attention. First-token global attention is retained from code as an implementation detail. ClinicalBERT is an ablation, limited to 512 tokens. |
+| Twenty-nine physiological variables; hourly observations through prediction time; short sequences zero-padded/masked; train-fold imputation and standardization; observation indicators (P038; Figure 1) | 8 vital signs + 21 laboratory variables in `extract_structured.py`; v4 data schema; `fit_struct_stats`, `normalize_structured`, `StructuredEncoder` | Variable count and two masks are aligned. Original times are filtered before aggregation to `[0,T)`, fixing the 24-hour boundary. Missing internal hours are imputed; observations after the last observed bin are treated as padding. The exact sequence-end convention is not stated in the manuscript and remains the prior code convention, now recorded explicitly. |
+| Fixed 10% patient-level hold-out; five folds over the remaining 90%; every fold model is evaluated on the same hold-out; report the arithmetic mean of five metrics (P108–111) | `protocol.build_splits`, `fold_frames`, `main_multimodal.main`, `aggregate_run` | Aligned in design. Patients do not cross partitions; each fold has separate statistics, priors, checkpoint, and hold-out metrics. The implementation uses a seeded permutation and rounds the 10% patient count upward. The historical fixed list, seed, five checkpoints, and fold outputs have not been tied to the manuscript tables. |
+| Clinical-Longformer, label-wise text attention, GRU, label-driven scaled cross-attention, temporal mask, learned gate, element-wise fusion, per-class linear scores (P048–076; Figure 1; equations 1–7) | `models_multimodal.py`: text encoder, masked softmax, `StructuredEncoder`, `GCMFusion`, class-specific rows of `fc` | Equations and module connections align. The fusion follows `F = z⊙D + (1-z)⊙S`; the extra post-fusion LayerNorm from the prior code was removed. Figure 1 separately shows text-token and temporal masks, both represented in the implementation. |
+| Single-label categorical softmax cross-entropy with `λ log π` during training; λ=1; raw-logit argmax at inference (P074–083; Figure 1; equations 8–10) | `DRGModel.loss`, per-fold `prepare_class_prior`, `train_utils.predict`, `options_multimodal.py` | Aligned. LG-GCMN defaults to λ=1; the class prior comes only from the training fold; validation/test loss and inference use raw logits. The manuscript does not establish that historical numbers were generated with this setting. |
+| Comparisons: GRU, CAML, Clinical-Longformer, Concat (P084–088) | `models_multimodal.py`, shared cohort/split in `main_multimodal.py` | Model list and input windows align. CAML uses the shared early-note loader and a vocabulary fitted only on training notes. Historical CAML resource and input provenance are not established. |
+| Table 3 ablations: ClinicalBERT, label attention, and GCM, in MS cohort (P117–120) | `run_experiments.py --ablations`; default `--ablation_cohorts ms` | Corrected scheduler default. The two cohort comparison runs remain available; APR ablations require explicit selection. |
+| Macro/micro F1 and AUC, top-5 accuracy, APE-CMI (P089–106; equations 11–17) | `eval_utils.evaluate_predictions` | Formulas align where defined. Classification uses all test admissions. CMI applies 2013 relative weights to the first eligible hospital admission per test patient, with absolute percentage error. See the internal “all admissions” wording conflict below. |
+| 24/48-hour conditional CC/MCC evaluation using trained models (P126) | `evaluate_fold`, `eval_cc_mcc.py` | The same fitted fold model is evaluated separately at both windows. Family and sample counts are computed from actual rules/predictions; the manuscript's 172 families / 1,699 cases are not forced. Ambiguous `W/O MCC` labels are not automatically treated as `with CC`. |
+| Predicted-class text spans, temporal attention, gate, and case examples (P136–142, Table 4) | `generate_report.py`, `visualize_attention.py` | Uses complete visible five-word spans, mean text gate, and true maximum valid hourly bin. A separate weighted centroid is named as a centroid. Attention is not causal evidence. Table 4's fractional-hour “peaks” cannot be recovered from hourly attention without an unreported mapping. |
+
+## Manuscript and Code Conflicts
+
+### Cohort totals versus the LOS criterion
+
+P031–032 and Table 1 report final cohorts of 19,789 MS and 27,394 APR admissions, with 3 and 20 missing-structured exclusions. The manuscript also says ICU LOS must be at least 24 hours. In the recorded read-only local metadata screening, the age + single-ICU + retained no-transfer stage has 21,938 MS and 29,596 APR admissions. Applying the explicit 24-hour duration criterion reduces these to 18,144 and 24,673 before any note or structured-data exclusions. The reported final totals cannot be obtained by further filtering those cohorts. The training code applies the stated LOS criterion and does not insert the manuscript's counts. The authors must verify the cohort table, filter order, and historical source tables before presenting those counts as generated by this pipeline.
+
+### CMI admission population
+
+P105 defines predicted and true CMI “across all admissions”; P106 then says to retain only the first eligible hospital admission per unique patient in the test set. The implementation follows the more specific population rule in P106. Classification metrics still use all eligible test admissions, and both true and predicted CMI use the identical first-admission subset. The published 2.81% and 2.52% values should be recomputed or documented against the exact subset and patient count.
+
+### Fractional temporal peaks
+
+Table 4 reports subhour peak times (for example 1.5, 5.3, and 3.9 hours), while P038 describes hourly resampling and P136–142 do not define interpolation or a subhour calculation. The prior report code called an attention-weighted mean a “peak.” The revised report now labels the first maximum valid hourly bin as the peak and records the weighted centroid separately. This preserves the mathematical meaning of “peak” and avoids presenting the centroid as a maximum. It cannot reconstruct Table 4's fractional values; the manuscript's calculation and source timestamps need author confirmation.
+
+### Macro-AUC when a class is absent
+
+P097–099 define macro-AUC as a mean over all classes but do not state how to handle a test fold with no positive or no negative case for a class. The implementation reports the all-class macro-AUC as undefined (`null`) if any class AUC is undefined, and separately reports the mean over defined classes and the omitted count. It does not silently change the denominator or fabricate an AUC.
+
+## Choices Retained Where the Paper Is Silent
+
+- **No-transfer screen:** retained from the original cohort code; the paper specifies one ICU stay but does not define ward transfer exclusions.
+- **APR duplicate policy:** keep the first source record per same-description admission, then exclude unresolved conflicting codes; no highest-severity choice is claimed.
+- **Similarity threshold:** `0.95` default because the paper supplies τ without a value. Cohort and run audits record the setting.
+- **Sequence end:** valid prefix ends at the last observed hourly bin inside the current horizon. Gaps before that point remain valid imputed steps; later bins are masked padding.
+- **AUC edge case:** explicit null for the paper's all-class macro-AUC when some class AUCs are undefined; defined-class mean is supplemental.
+- **Other defaults:** random seeds, GRU width/layers, dropout, weight decay, vocabulary minimum frequency, and CAML initialization follow current code/configuration and are written to each run. They are not attributed to the manuscript unless explicitly listed there.
+- **ITEMID verification:** the current local data directory did not include `D_ITEMS.csv` or `D_LABITEMS.csv`. The audit confirms that the code maps 8 vital-sign and 21 laboratory feature names, but it cannot independently verify the configured IDs against those dictionaries. CareVue coverage is not established.
+
+## Historical Results and Release Boundaries
+
+The code correction and synthetic checks do not show that the manuscript's Tables 1–4 came from this implementation. Historical checkpoints and local MIMIC/rule resources were present during earlier local review, but the required complete five-fold split manifests, matching fold checkpoints, per-fold predictions, and settings have not been established as the provenance of the latest manuscript. No real-data full training was performed for this audit, and no CUDA GPU was available in the checked environment. Existing historical artifacts must not be relabeled as outputs of the corrected schema or architecture.
+
+The repository does not contain patient data, rules, checkpoints, pretrained weights, local paths, source documents, or a fabricated license. The code stores run configuration, input/resource hashes, environment details, fold metrics, and masks for future audit. Historical numbers require original run records or fresh experiments using the final cohort and exact settings.
